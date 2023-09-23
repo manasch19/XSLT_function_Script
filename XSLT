@@ -1,0 +1,160 @@
+//import javax.xml.transform.*
+import javax.xml.transform.stream.*
+import groovy.sql.Sql
+//import java.io.*
+import com.boomi.execution.ExecutionUtil;
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.stream.StreamResult
+import javax.xml.transform.stream.StreamSource
+import java.nio.file.*
+import java.nio.charset.StandardCharsets;
+import java.io.File
+import java.io.BufferedReader
+import java.io.BufferedWriter
+import java.io.FileReader
+import java.io.FileWriter
+
+logger = ExecutionUtil.getBaseLogger();
+
+String database=ExecutionUtil.getDynamicProcessProperty("IR_DATABASE");
+String port =ExecutionUtil.getDynamicProcessProperty("IR_PORT");
+String host=ExecutionUtil.getDynamicProcessProperty("IR_HOST");
+def user = ExecutionUtil.getDynamicProcessProperty("IR_USERID")
+def password = ExecutionUtil.getDynamicProcessProperty("IR_PASSWORD")
+
+String url="jdbc:postgresql://"+host+":"+port+"/"+database;
+def sql = Sql.newInstance(url, user, password)
+
+def IR_TALEND_OUTPUT_TEMP=com.boomi.execution.ExecutionUtil.getDynamicProcessProperty("IR_TALEND_OUTPUT")
+def BATCH_NAME=com.boomi.execution.ExecutionUtil.getDynamicProcessProperty("BATCH_NAME")
+String INTERFACE=ExecutionUtil.getDynamicProcessProperty("INTERFACE");
+String CMMS_ID=ExecutionUtil.getDynamicProcessProperty("CMMS_ID");
+
+logger.info("----------IR_DATABASE --------"+database);
+logger.info("----------IR_TALEND_OUTPUT TEMP --------"+IR_TALEND_OUTPUT_TEMP);
+
+def result = sql.firstRow("""
+SELECT ALC.FILENAME,
+ATC.transform_type,
+ATC.transform_script,
+ATC.custom_field
+  FROM autotransform_control ATC
+JOIN autoloader_control ALC  ON  ATC.autoloader_id=ALC.autoloader_id 
+AND ATC.CMMS_ID=ALC.CMMS_ID 
+WHERE ALC.batch_name='${BATCH_NAME}'
+AND ALC.CMMS_ID='${CMMS_ID}' 
+AND ATC.CMMS_ID='${CMMS_ID}'  order by ATC.autotransform_id, ATC.autoloader_id ASC 
+""")
+
+def FILENAME = result.FILENAME
+def TRANSFORM_SCRIPT = result.transform_script
+
+String IR_TALEND_OUTPUT=IR_TALEND_OUTPUT_TEMP.replaceAll("/","\\") +"\\"+CMMS_ID+ "\\"+INTERFACE+"\\"+BATCH_NAME+"\\";
+
+logger.info("----------IR_TALEND_OUTPUT --------"+IR_TALEND_OUTPUT);
+
+logger.info("----------FILENAME --------"+FILENAME);
+
+
+// Define the path to the input directory, XSL file, and output directory
+def xslPath = IR_TALEND_OUTPUT+FILENAME.replace('.csv', '.xsl')
+
+
+// Write the column value to the flat file
+new File(xslPath).withWriter { writer ->
+    writer.write(TRANSFORM_SCRIPT + "\n")
+}
+
+// Get a list of all XML files in the input directory
+def xmlFiles = new File(IR_TALEND_OUTPUT).listFiles(new FilenameFilter() {
+    boolean accept(File dir, String name) {
+        name.endsWith('.xml')
+    }
+})
+
+// Loop through the list of XML files and transform each one
+logger.info("----------Loop through the list of XML files and transform each one --------");
+xmlFiles.each { xmlFile ->
+    // Define the path to the output file
+    def outputFilename = xmlFile.getName().replace('.xml', '.dat')
+    def outputPath = new File(IR_TALEND_OUTPUT, outputFilename)
+    
+    logger.info("----------xmlFile --------"+xmlFile.getName());
+    
+    logger.info("----------xslPath --------"+xslPath);
+    logger.info("----------outputFilename --------"+outputFilename);
+    logger.info("----------outputPath --------"+outputPath);
+
+    // Create a StreamSource for the input XML document
+    def xml = new StreamSource(xmlFile)
+
+    // Create a StreamSource for the XSLT document
+    def xslt = new StreamSource(new File(xslPath))
+
+    // Create a transformer
+    def factory = TransformerFactory.newInstance()
+    def transformer = factory.newTransformer(xslt)
+
+    // Create a BufferedWriter for the output file
+    def writer = new BufferedWriter(new FileWriter(outputPath,StandardCharsets.UTF_8))
+
+    // Perform the transform and write the output to the file
+    transformer.transform(xml, new StreamResult(writer))
+    
+    // Close the writer
+    writer.close()
+}
+
+//===========================
+// Get a list of all DAT files in the input directory
+def datFiles = new File(IR_TALEND_OUTPUT).listFiles(new FilenameFilter() {
+    boolean accept(File dir, String name) {
+        name.endsWith('.dat')
+    }
+})
+
+// Define the path to the output file
+def outputPath = new File(IR_TALEND_OUTPUT, FILENAME)
+
+// Check if the output file already exists and delete it if it does
+if (outputPath.exists()) {
+    outputPath.delete()
+}
+
+// Loop through the list of DAT files and append each one to the output file
+logger.info("----------Loop through the list of DAT files and append each one to the output file --------");
+datFiles.eachWithIndex { datFile, index ->
+    // Create a BufferedReader to read the contents of the file
+    def reader = new BufferedReader(new FileReader(datFile,StandardCharsets.UTF_8))
+
+    // Create a BufferedWriter to write the contents to the output file
+    def writer = new BufferedWriter(new FileWriter(outputPath,StandardCharsets.UTF_8,true))
+	
+	logger.info("----------Current Dat file :  --------"+datFile);
+	logger.info("----------Output file :  --------"+outputPath);
+
+    // Read the contents of the file and write them to the output file
+    if (index == 0) {
+        // If this is the first file, write the header to the output file
+		logger.info("----------INDEX is ZERO which means this is FIRST FILE : --------"+datFile);
+        writer.write(reader.readLine())
+        writer.newLine()
+    } else {
+        // If this is not the first file, skip the header
+		logger.info("----------THIS IS NOT THE  FIRST FILE and the INDEX IS : --------"+index);
+        reader.readLine()
+    }
+
+    // Write the rest of the file to the output file
+    String line = reader.readLine()
+    while (line != null) {
+        writer.write(line)
+        writer.newLine()
+        line = reader.readLine()
+    }
+
+    // Close the reader and writer
+    reader.close()
+    writer.close()
+}
+
